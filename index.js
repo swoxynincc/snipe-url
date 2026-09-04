@@ -1,134 +1,110 @@
-"use strict";
-const fs = require("fs");
-const WS = require("ws");
-const axios = require("axios");
+import config from "./config.js";
+import { createClient, getCurrentVanity, verifyConfiguration } from "./discord.js";
+import { notify } from "./notifier.js";
 
-const cfg = JSON.parse(fs.readFileSync("./config.json", "utf8"));
-const T = cfg.token;
-const ID = cfg.guildId;
-const WH = cfg.webhook;
-const PW = cfg.password;
+const { client, login } = createClient(config.token);
 
-const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
+let stopping = false;
+let timer = null;
 
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
-const http = axios.create({
-  baseURL: "https://canary.discord.com",
-  timeout: 10000,
-  headers: { "User-Agent": UA, "Content-Type": "application/json" }
-});
-// global axios (webhook icin tam URL ile kullanilacak)
-const rawAxios = axios.create({ timeout: 10000, headers: { "Content-Type": "application/json", "User-Agent": UA } });
+function backoffDelay(attempt) {
+  const exponential = Math.min(
+    config.pollIntervalMs * (2 ** attempt),
+    config.maxBackoffMs
+  );
 
-// ---------- state ----------
-let mt = "";
-const MFA_PATH = "./mfa.txt";
-try { mt = fs.readFileSync(MFA_PATH, "utf8").trim(); } catch {}
-fs.watch(MFA_PATH, { persistent: false }, () => {
-  try { const t = fs.readFileSync(MFA_PATH, "utf8").trim(); if (t) { mt = t; console.log("[MFA] dosyadan yuklendi"); } } catch {}
-});
+  // Small jitter prevents synchronized retries.
+  return Math.floor(exponential * (0.8 + Math.random() * 0.4));
+}
 
-const monitored = new Map();   /
-const claimed = new Set();     
-const stats = { snipe: 0, ok: 0, fail: 0 };
+async function monitor(guild, channel) {
+  let previous = undefined;
+  let failureCount = 0;
 
-// ---------- grace ----------
-const grace = new Map(0);
-const graceTimers = new Map();
-const GRACE_MS = 30 * 24 * 60 * 60 * 1000;
-function addGrace(code) { if (code) grace.set(code, Date.now() + GRACE_MS); }
-function loadGrace() { try { const d = fs.readFileSync("./grace.txt", "utf8"); d.split("\n").forEach(l => { const [c, t] = l.trim().split(","); if (c && t) grace.set(c, parseInt(t) * (parseInt(t) < 1e12 ? 1000 : 1)); }); } catch {} }
-function saveGrace() { try { let o = ""; grace.forEach((e, c) => o += `${c},${e}\n`); fs.writeFileSync("./grace.txt.tmp", o); fs.renameSync("./grace.txt.tmp", "./grace.txt"); } catch {} }
-loadGrace();
+  while (!stopping) {
+    try {
+      const current = await getCurrentVanity(guild);
 
+      failureCount = 0;
 
-async function acquireMfa() {
-  try {
-    await http.patch("/api/v9/guilds/0/vanity-url", {});
-  } catch (a) {
-    const d = e.response && e.response.data;
-    if (d && d.code === 60003 && d.mfa && d.mfa.ticket) {
-      try {
-        const r = await http.post("/api/v9/mfa/finish", { ticket: d.mfa.ticket, mfa_type: "password", data: PW });
-        if (r.data && r.data.token) { mt = r.data.token; console.log("[MFA] token alindi"); }
-      } catch (e2) { console.log("[MFA] alinamadi", e2.message); }
+      // First observation establishes the baseline without generating
+      // a notification.
+      if (previous === undefined) {
+        previous = current;
+        console.log(
+          `Initial vanity state: ${current ?? "none"}`
+        );
+      } else if (current !== previous) {
+        console.log("Vanity state changed.");
+
+        await notify(channel, previous, current);
+        previous = current;
+      }
+
+      await sleep(config.pollIntervalMs);
+    } catch {
+      failureCount += 1;
+
+      const delay = backoffDelay(failureCount);
+
+      console.error(
+        `Monitoring temporarily failed; retrying in ${Math.round(
+          delay / 1000
+        )} seconds.`
+      );
+
+      await sleep(delay);
     }
   }
 }
 
-async function claim(vanity) {
-  const headers = { "Authorization": T };
-  if (mt) headers["X-Discord-MFA-Authorization"] = mt;
-  // flaw: burst yok, 3 deneme de ayri ayri await ediliyor
-  for (let i = 0; i < 3; i++) {
-    try {
-      await http.patch("/api/v9/guilds/" + ID + "/vanity-url", { code: vanity }, { headers });
-    } catch (e) { /* fail yedi */ }
+async function shutdown(signal) {
+  if (stopping) return;
+
+  stopping = true;
+
+  console.log(`Received ${signal}; shutting down.`);
+
+  if (timer) {
+    clearTimeout(timer);
   }
+
+  await client.destroy();
+  process.exit(0);
 }
 
-async function checkVanity(vanity) {
-  try {
-    const r = await http.get("/api/v9/guilds/" + ID + "/vanity-url", { headers: { "Authorization": T } });
-    return r.data && r.data.code === vanity;
-  } catch { return false; }
+async function main() {
+  await login();
+
+  const { guild, channel } = await verifyConfiguration(
+    client,
+    config.guildId,
+    config.notificationChannelId
+  );
+
+  console.log(`Monitoring authorized guild: ${guild.name}`);
+
+  await monitor(guild, channel);
 }
 
-async function sendWebhook(vanity, ok) {
-  if (!WH) return;
-  try {
-    await rawAxios.post(WH, { content: ok ? `@everyone ${vanity}` : fail yedik url ${vanity}` });
-  } catch {}
-}
+process.once("SIGINT", () => void shutdown("SIGINT"));
+process.once("SIGTERM", () => void shutdown("SIGTERM"));
 
+process.on("unhandledRejection", () => {
+  console.error("Unhandled promise rejection.");
+});
 
-async function fire(guildId, vanity) {
-  if (!vanity || claimed.has(vanity)) return;
-  claimed.add(vanity);
-  stats.snipe++;
-  console.log("[SNIPE] ->", vanity, "(guild", guildId + ")");
-  await claim(vanity);                 // axios, dogal yavaslik
-  const ok = await checkVanity(vanity);
-  if (ok) stats.ok++; else stats.fail++;
-  console.log("[SNIPE]", vanity, "|", ok ? "OK" : "FAIL", `(${stats.ok}/${stats.fail})`);
-  addGrace(vanity);
-  saveGrace();
-  await sendWebhook(vanity, ok);
-}
+process.on("uncaughtException", () => {
+  console.error("Uncaught exception.");
+  void shutdown("uncaughtException");
+});
 
-
-function handleMessage(data) {
-  let msg;
-  try { msg = JSON.parse(data); } catch { return; }   // axios yok, WS yine JSON.parse (sadece event icin)
-  if (msg.t === "READY") {
-    for (const g of (msg.d.guilds || [])) if (g.vanity_url_code) monitored.set(g.id, g.vanity_url_code);
-    console.log("[READY]", monitored.size, "guild izleniyor");
-  } else if (msg.t === "GUILD_UPDATE") {
-    const g = msg.d;
-    const old = monitored.get(g.id);
-    if (old && old !== g.vanity_url_code) { monitored.set(g.id, g.vanity_url_code); fire(g.id, old); }
-  } else if (msg.t === "GUILD_DELETE") {
-    const old = monitored.get(msg.d.id);
-    if (old) { monitored.delete(msg.d.id); fire(msg.d.id, old); }
-  }
-}
-
-function connect(url, label) {
-  const ws = new WS(url, { perMessageDeflate: false, handshakeTimeout: 10000 });
-  ws.on("open", () => {
-    console.log("[WS-" + label + "] baglandi");
-    ws.send(JSON.stringify({ op: 2, d: { token: T, intents: 1, properties: { os: "Windows", browser: "Chrome", device: "" } } }));
-    setInterval(() => ws.send(JSON.stringify({ op: 1, d: null })), 41250);
-  });
-  ws.on("message", (data) => handleMessage(data));
-  ws.on("close", () => { console.log("[WS-" + label + "] kapandi, 3sn sonra..."); setTimeout(() => connect(url, label), 3000); });
-  ws.on("error", () => {});
-}
-
-
-(async () => {
-  await acquireMfa();
-  connect("wss://gateway.discord.gg/?v=9&encoding=json", "genel");
-  connect("wss://gateway-us-east1-b.discord.gg/?v=9&encoding=json", "us-east");
-  console.log("[SYS] axios sniper basladi");
-})();
+main().catch(() => {
+  console.error("Startup failed. Check configuration and bot permissions.");
+  void client.destroy();
+  process.exit(1);
+});
