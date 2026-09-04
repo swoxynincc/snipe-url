@@ -6,15 +6,18 @@ import {
 
 export function createClient(token) {
   const client = new Client({
-    intents: [GatewayIntentBits.Guilds]
+    intents: [
+      GatewayIntentBits.Guilds,
+      GatewayIntentBits.GuildMessages,
+      GatewayIntentBits.MessageContent
+    ]
   });
 
   client.once("ready", () => {
-    console.log(`Connected as ${client.user.tag}`);
+    console.log(`Logged in as ${client.user.tag}`);
   });
 
   client.on("error", () => {
-    // Don't log potentially sensitive error objects or request data.
     console.error("Discord client error.");
   });
 
@@ -27,52 +30,62 @@ export function createClient(token) {
   };
 }
 
-export async function verifyConfiguration(client, guildId, channelId) {
+export async function verifyConfiguration(
+  client,
+  guildId,
+  channelId
+) {
   const guild = await client.guilds.fetch(guildId);
 
   if (!guild) {
-    throw new Error("Configured guild could not be fetched.");
+    throw new Error("Guild could not be found.");
   }
 
   const channel = await client.channels.fetch(channelId);
 
-  if (!channel?.isTextBased()) {
-    throw new Error("Notification channel is not a text-based channel.");
+  if (!channel || !channel.isTextBased()) {
+    throw new Error(
+      "Notification channel is not a text-based Discord channel."
+    );
   }
 
   if (channel.guildId !== guildId) {
     throw new Error(
-      "Notification channel must belong to the monitored guild."
+      "Notification channel does not belong to the configured guild."
     );
   }
 
-  const me = guild.members.me;
+  const member = guild.members.me;
 
-  if (!me) {
-    throw new Error("Bot member is not available in the guild.");
+  if (!member) {
+    throw new Error(
+      "The bot's guild member could not be found."
+    );
   }
 
-  const permissions = channel.permissionsFor(me);
+  const permissions = channel.permissionsFor(member);
 
   if (!permissions?.has(PermissionFlagsBits.ViewChannel)) {
-    throw new Error("Bot lacks View Channel permission.");
+    throw new Error("Bot cannot view the notification channel.");
   }
 
   if (!permissions.has(PermissionFlagsBits.SendMessages)) {
-    throw new Error("Bot lacks Send Messages permission.");
+    throw new Error("Bot cannot send messages to the notification channel.");
   }
 
-  return { guild, channel };
+  return {
+    guild,
+    channel
+  };
 }
 
-/**
- * Documented Discord operation:
- * Get the vanity URL assigned to this guild.
+/*
+ * Gets the vanity URL currently assigned to this guild.
  *
- * This deliberately does NOT accept an arbitrary candidate vanity code.
+ * This does NOT check arbitrary vanity codes.
  */
 export async function getCurrentVanity(guild) {
-  const vanity = await guild.fetchVanityData();
+  const vanityData = await guild.fetchVanityData();
 
-  return vanity?.code ?? null;
+  return vanityData?.code ?? null;
 }
