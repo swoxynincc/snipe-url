@@ -1,0 +1,9 @@
+discord-vanity-monitor/
+├── package.json
+├── .env.example
+├── .gitignore
+└── src/
+    ├── config.js
+    ├── discord.js
+    ├── notifier.js
+    └── index.js
