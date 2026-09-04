@@ -1,14 +1,20 @@
 export async function notify(channel, oldCode, newCode) {
-  const oldValue = oldCode ? `discord.gg/${oldCode}` : "none";
-  const newValue = newCode ? `discord.gg/${newCode}` : "none";
+  const oldValue = oldCode
+    ? `https://discord.gg/${oldCode}`
+    : "None";
 
-  const message =
-    `Vanity URL state changed.\n` +
-    `Previous: ${oldValue}\n` +
-    `Current: ${newValue}`;
+  const newValue = newCode
+    ? `https://discord.gg/${newCode}`
+    : "None";
 
   await channel.send({
-    content: message,
-    allowedMentions: { parse: [] }
+    content:
+      `🔔 **Vanity URL changed**\n\n` +
+      `Previous: ${oldValue}\n` +
+      `Current: ${newValue}`,
+
+    allowedMentions: {
+      parse: []
+    }
   });
 }
